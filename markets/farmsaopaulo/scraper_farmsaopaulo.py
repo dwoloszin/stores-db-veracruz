@@ -1,8 +1,8 @@
 """
-scraper_campea.py — Scraper for Drogarias Campeã (https://www.drogariascampea.com.br)
+scraper_farmsaopaulo.py — Scraper for Farmácias São Paulo (https://www.farmaciassaopaulo.com.br)
 
 Platform  : Convertiez (io.convertiez.com.br)
-Discovery : /s/drogariascampea/sitemap.xml -> sitemap-products-1.xml (~19.8k URLs)
+Discovery : /s/farmaciasaopaulo/sitemap.xml -> sitemap-products-1.xml (~19.8k URLs)
 Per page  : each product page is server-rendered with an embedded Product JSON
             block that carries everything we need:
                 name                 -> product_name
@@ -20,9 +20,9 @@ chars in the description, so fields are extracted with targeted regexes rather
 than a full json.loads.
 
 Usage:
-    python -m markets.campea.scraper_campea              # scrape -> DB
-    python -m markets.campea.scraper_campea --limit 300  # test run -> DB
-    python -m markets.campea.scraper_campea --csv        # scrape -> DB + CSV
+    python -m markets.campea.scraper_farmsaopaulo              # scrape -> DB
+    python -m markets.campea.scraper_farmsaopaulo --limit 300  # test run -> DB
+    python -m markets.campea.scraper_farmsaopaulo --csv        # scrape -> DB + CSV
 """
 
 import csv
@@ -38,9 +38,9 @@ import requests
 
 sys.stdout.reconfigure(line_buffering=True)
 
-BASE_URL   = "https://www.drogariascampea.com.br"
-STORE_ID   = "campea"
-SITEMAP    = f"{BASE_URL}/s/drogariascampea/sitemap.xml"
+BASE_URL   = "https://www.farmaciassaopaulo.com.br"
+STORE_ID   = "farmsaopaulo"
+SITEMAP    = f"{BASE_URL}/s/farmaciasaopaulo/sitemap.xml"
 WORKERS    = 16
 DELAY      = 0.0
 MAX_TRIES  = 4
@@ -108,7 +108,7 @@ def _get(session: requests.Session, url: str, diag: bool = False) -> Optional[re
 # Known product sub-sitemaps — used as a fallback when the index can't be
 # fetched/parsed (e.g. a datacenter-IP bot challenge that returns HTML, not XML).
 SUBMAP_FALLBACK = [
-    f"{BASE_URL}/s/drogariascampea/sitemap-products-{i}.xml" for i in range(1, 6)
+    f"{BASE_URL}/s/farmaciasaopaulo/sitemap-products-{i}.xml" for i in range(1, 6)
 ]
 
 
@@ -344,7 +344,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Scrape Drogarias Campeã -> PostgreSQL (DB always written; CSV optional)"
+        description="Scrape Farmácias São Paulo -> PostgreSQL (DB always written; CSV optional)"
     )
     parser.add_argument("--limit",   type=int, default=None,    help="Stop after N products (test)")
     parser.add_argument("--workers", type=int, default=WORKERS, help=f"Parallel workers (default: {WORKERS})")
@@ -356,10 +356,10 @@ if __name__ == "__main__":
     parser.add_argument("--env",     type=str, default=".env",  help=".env file path")
     args = parser.parse_args()
 
-    from db.db_manager import CampeaDB, load_env
+    from db.db_manager import FarmSaoPauloDB, load_env
     load_env(args.env)
 
-    db    = CampeaDB()
+    db    = FarmSaoPauloDB()
     stats = scrape(db, limit=args.limit, workers=args.workers, min_price=args.min_price)
     db.close()
 
@@ -376,6 +376,6 @@ if __name__ == "__main__":
 
     if args.csv or args.output:
         output_dir = args.output or "."
-        db2 = CampeaDB()
+        db2 = FarmSaoPauloDB()
         db2.export(output_dir, tables=["offers"])
         db2.close()

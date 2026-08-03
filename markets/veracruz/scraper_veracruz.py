@@ -193,15 +193,21 @@ def _standardize(url: str, html: str) -> Optional[Dict]:
     if not name:
         return None
 
-    regular = _to_float(_first(_RE_PRICE, window))
-    sale    = _to_float(_first(_RE_SALE, window))
-    if regular is None or regular <= 0:
-        if sale and sale > 0:
-            regular, sale = sale, None
-        else:
-            return None
-
-    promo_price = sale if (sale is not None and 0 < sale < regular) else None
+    # Convertiez feed: `sale_price` is the real SELLING price (it matches the
+    # schema.org JSON-LD offer price Google reads); `price` is a reference. When
+    # price > selling it is a genuine "de" (a real promo). When price < selling
+    # it is an understated value we must NOT trust — selling is then the regular
+    # price. This fixes products (~14-26% on veracruz/farmsaopaulo) whose price
+    # was stored at the lower, wrong `price`. (No effect on campea, whose price
+    # is always >= selling.)
+    price   = _to_float(_first(_RE_PRICE, window))
+    selling = _to_float(_first(_RE_SALE, window)) or price
+    if selling is None or selling <= 0:
+        return None
+    if price is not None and price > selling:
+        regular, promo_price = price, selling      # real discount (de/por)
+    else:
+        regular, promo_price = selling, None
     discount_pct = (
         round((1 - promo_price / regular) * 100, 1)
         if promo_price else None

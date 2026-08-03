@@ -69,6 +69,10 @@ _STORES: Dict[str, List[str]] = {
     "integral":         [sys.executable, "-m", "markets.integral.scraper_integral"],
     "nissei":           [sys.executable, "-m", "markets.nissei.scraper_nissei"],
     "veracruz":         [sys.executable, "-m", "markets.veracruz.scraper_veracruz"],
+    "farmagerty":       [sys.executable, "-m", "markets.farmagerty.scraper_farmagerty"],
+    "farmsaopaulo":     [sys.executable, "-m", "markets.farmsaopaulo.scraper_farmsaopaulo"],
+    "sampharma":        [sys.executable, "-m", "markets.sampharma.scraper_sampharma"],
+    "drogal":           [sys.executable, "-m", "markets.drogal.scraper_drogal"],
 }
 
 # Stores whose EAN must be enriched from product pages after scraping
@@ -352,6 +356,11 @@ def main() -> None:
     parser.add_argument("--csv",         action="store_true",       help="Also export a CSV file after each scrape")
     parser.add_argument("--env",         type=str,  default=".env", help=".env file path (default: .env)")
     parser.add_argument("--log",         action="store_true",       help="Write per-store log files to logs/ (default: off)")
+    parser.add_argument("--only-stale",  action="store_true", dest="only_stale",
+                        help="Only run stores whose Neon data is older than --stale-hours "
+                             "(local self-heal for stores GitHub can't refresh, e.g. Convertiez)")
+    parser.add_argument("--stale-hours", type=int, default=24, dest="stale_hours",
+                        help="Staleness threshold in hours for --only-stale (default: 24)")
     args = parser.parse_args()
 
     stores = args.stores or list(_STORES)
@@ -359,6 +368,17 @@ def main() -> None:
 
     # Load env so DB_URL vars are available to subprocesses via inherited environment
     _load_env(args.env)
+
+    # ── stale filter ──────────────────────────────────────────────────────────
+    # Keep only stores whose Neon offers.updated_at is missing or older than the
+    # threshold. Lets a local `python -m main --only-stale` refresh exactly the
+    # stores that fell behind (blocked from GitHub, or a failed cloud run) while
+    # skipping the ones the cloud already keeps fresh. `--stores X` still forces X.
+    if args.only_stale:
+        stores = _filter_stale(stores, args.stale_hours)
+        if not stores:
+            print(f"All selected stores are fresh (< {args.stale_hours}h). Nothing to do.")
+            return
 
     # Create logs directory
     log_dir = Path("logs")
@@ -518,6 +538,53 @@ def _extract_progress_percent(log_path: Optional[Path]) -> Optional[float]:
             if 0.0 < val <= 100.0:
                 latest = val
     return latest
+
+
+def _filter_stale(stores: List[str], hours: int) -> List[str]:
+    """Return the subset of `stores` whose Neon offers.updated_at is missing or
+    older than `hours`. A store is considered stale (and kept) if its DB has no
+    rows, is unreachable, or has no registered env key — i.e. anything that means
+    "needs a local run". Fresh stores are skipped. Requires env already loaded."""
+    from datetime import datetime, timezone
+    from db.db_manager import STORE_REGISTRY
+
+    print(f"\nChecking Neon freshness (threshold {hours}h) for {len(stores)} store(s) ...")
+    now = datetime.now(timezone.utc)
+    stale: List[str] = []
+    for store in stores:
+        cls = STORE_REGISTRY.get(store)
+        if cls is None or not os.environ.get(cls.DB_ENV_KEY):
+            print(f"  {store:<22} no DB key — SKIP (can't run)")
+            continue
+        db = None
+        try:
+            db = cls()
+            last = db.last_update()
+        except Exception as exc:
+            print(f"  {store:<22} DB error ({exc.__class__.__name__}) — STALE (will run)")
+            stale.append(store)
+            continue
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        if last is None:
+            print(f"  {store:<22} empty — STALE (will run)")
+            stale.append(store)
+            continue
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        age_h = (now - last).total_seconds() / 3600
+        if age_h >= hours:
+            print(f"  {store:<22} {age_h:5.1f}h old — STALE (will run)")
+            stale.append(store)
+        else:
+            print(f"  {store:<22} {age_h:5.1f}h old — fresh, skip")
+    print(f"Stale stores to run: {len(stale)}"
+          + (f" ({', '.join(stale)})" if stale else ""))
+    return stale
 
 
 def _load_env(path: str = ".env") -> None:

@@ -692,6 +692,19 @@ class StoreDB:
         print(f"  Marked {flipped:,} stale offers unavailable (not seen in {hours}h).")
         return flipped
 
+    def last_update(self) -> Optional[datetime]:
+        """Return the most recent offers.updated_at, or None if the table is
+        empty. Used by the local `--only-stale` refresh to decide whether a
+        store's Neon data has gone stale (e.g. a store GitHub can't reach)."""
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT max(updated_at) FROM offers")
+                row = cur.fetchone()
+                return row[0] if row else None
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            self._reconnect()
+            return self.last_update()
+
     def close(self) -> None:
         self._conn.close()
 
@@ -880,6 +893,26 @@ class VeraCruzDB(StoreDB):
     DB_ENV_KEY = "DATABASE_URL_VERACRUZ"
 
 
+class FarmagertyDB(StoreDB):
+    STORE_ID   = "farmagerty"
+    DB_ENV_KEY = "DATABASE_URL_FARMAGERTY"
+
+
+class FarmSaoPauloDB(StoreDB):
+    STORE_ID   = "farmsaopaulo"
+    DB_ENV_KEY = "DATABASE_URL_FARMSAOPAULO"
+
+
+class SampharmaDB(StoreDB):
+    STORE_ID   = "sampharma"
+    DB_ENV_KEY = "DATABASE_URL_SAMPHARMA"
+
+
+class DrogalDB(StoreDB):
+    STORE_ID   = "drogal"
+    DB_ENV_KEY = "DATABASE_URL_DROGAL"
+
+
 # Registry used by the CLI
 STORE_REGISTRY: Dict[str, type] = {
     "drogaleste":       DrogalesteDB,
@@ -918,6 +951,10 @@ STORE_REGISTRY: Dict[str, type] = {
     "integral":         IntegralDB,
     "nissei":           NisseiDB,
     "veracruz":         VeraCruzDB,
+    "farmagerty":       FarmagertyDB,
+    "farmsaopaulo":     FarmSaoPauloDB,
+    "sampharma":        SampharmaDB,
+    "drogal":           DrogalDB,
 }
 
 
