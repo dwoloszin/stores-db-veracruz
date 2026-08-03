@@ -1,0 +1,113 @@
+# .github/workflows/scrape.yml
+#
+# Per-store scraper workflow — injected into each store repo by deploy/deploy.py.
+# The cron schedule is replaced by deploy.py (46 */8 * * * -> actual value).
+#
+# Secrets required in each store repo (set automatically by deploy.py):
+#   STORE_KEY               — store key, e.g. "drogaleste"
+#   DATABASE_URL_{STORE}    — e.g. DATABASE_URL_DROGALESTE
+#   DB_ARCHIVE_GITHUB_TOKEN — PAT with repo + workflow scopes
+#   DB_ARCHIVE_GITHUB_REPO  — e.g. dwoloszin/markets_db_farm
+
+name: Scrape
+
+# Never run two scrapes at once (scheduled + manual, or a run that overruns)
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+on:
+  schedule:
+    - cron: '46 */8 * * *'   # per-store frequency tier — set by deploy.py (see STORE_SCHEDULE)
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max products to scrape (empty = no limit)"
+        required: false
+        default: ""
+      skip_enrich:
+        description: "Skip EAN enrichment step"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env from secrets
+        shell: python
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          STORE_KEY:   ${{ secrets.STORE_KEY }}
+        run: |
+          import os, json
+          secrets = json.loads(os.environ['ALL_SECRETS'])
+          store_key = os.environ.get('STORE_KEY', '').strip()
+          db_key = f'DATABASE_URL_{store_key.upper()}'
+
+          written = 0
+          with open('.env', 'w') as f:
+              for key in (db_key, 'DB_ARCHIVE_GITHUB_TOKEN', 'DB_ARCHIVE_GITHUB_REPO'):
+                  val = secrets.get(key, '')
+                  if val:
+                      f.write(f'{key}={val}\n')
+                      written += 1
+
+          print(f'Created .env with {written} variables for store: {store_key}')
+
+      - name: Run scraper
+        run: |
+          STORE="${{ secrets.STORE_KEY }}"
+          ARGS="--stores $STORE --log"
+
+          # Always enrich EAN on scheduled runs; allow skipping on manual dispatch
+          if [ "${{ inputs.skip_enrich }}" != "true" ]; then
+            ARGS="$ARGS --enrich-ean"
+          fi
+
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+
+          python -m main $ARGS
+
+      - name: Price enrichment (real selling price / promos)
+        if: success()
+        run: |
+          STORE="${{ secrets.STORE_KEY }}"
+          # Some stores (Drogasil/Drogaraia) only expose a reference/max price in
+          # the listing; a per-store enricher fetches product pages for the real
+          # selling price. Runs right after the scrape so promos are always fresh.
+          if [ -f "markets/$STORE/enrich_price_$STORE.py" ]; then
+            echo "Running price enrichment for $STORE ..."
+            python -m markets.$STORE.enrich_price_$STORE --workers 30
+          else
+            echo "No price enricher for $STORE — skipping"
+          fi
+
+      - name: Mark stale offers unavailable
+        if: success()
+        # Scrapers only upsert what they find, so products that drop off the site
+        # keep is_available=true forever. After a successful scrape, flip anything
+        # not refreshed in the last 24h to unavailable (it left the catalogue).
+        run: python -m db.db_manager mark-stale "${{ secrets.STORE_KEY }}" --hours 24
+
+      - name: Prune old price history
+        if: success()
+        run: python -m db.db_manager prune "${{ secrets.STORE_KEY }}" --days 180
