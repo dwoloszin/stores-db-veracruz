@@ -51,25 +51,22 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Create .env from secrets
-        shell: python
+        # Reference each secret EXPLICITLY by name. Do NOT serialise the whole
+        # secrets context into one var -- GitHub's scanner reads that as
+        # secret-exfiltration and gates the run ("workflow may be malicious").
+        # VERACRUZ is filled per-store by deploy.py.
+        shell: bash
         env:
-          ALL_SECRETS: ${{ toJSON(secrets) }}
-          STORE_KEY:   ${{ secrets.STORE_KEY }}
+          STORE_DB_URL:            ${{ secrets.DATABASE_URL_VERACRUZ }}
+          DB_ARCHIVE_GITHUB_TOKEN: ${{ secrets.DB_ARCHIVE_GITHUB_TOKEN }}
+          DB_ARCHIVE_GITHUB_REPO:  ${{ secrets.DB_ARCHIVE_GITHUB_REPO }}
         run: |
-          import os, json
-          secrets = json.loads(os.environ['ALL_SECRETS'])
-          store_key = os.environ.get('STORE_KEY', '').strip()
-          db_key = f'DATABASE_URL_{store_key.upper()}'
-
-          written = 0
-          with open('.env', 'w') as f:
-              for key in (db_key, 'DB_ARCHIVE_GITHUB_TOKEN', 'DB_ARCHIVE_GITHUB_REPO'):
-                  val = secrets.get(key, '')
-                  if val:
-                      f.write(f'{key}={val}\n')
-                      written += 1
-
-          print(f'Created .env with {written} variables for store: {store_key}')
+          {
+            printf 'DATABASE_URL_VERACRUZ=%s\n' "$STORE_DB_URL"
+            printf 'DB_ARCHIVE_GITHUB_TOKEN=%s\n' "$DB_ARCHIVE_GITHUB_TOKEN"
+            printf 'DB_ARCHIVE_GITHUB_REPO=%s\n' "$DB_ARCHIVE_GITHUB_REPO"
+          } > .env
+          echo "Created .env for VERACRUZ"
 
       - name: Run scraper
         run: |
