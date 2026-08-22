@@ -20,7 +20,9 @@ Usage:
 import csv
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,7 +34,19 @@ sys.stdout.reconfigure(line_buffering=True)
 BASE_URL  = "https://www.ultrafarma.com.br"
 STORE_ID  = "ultrafarma"
 PAGE_SIZE = 12    # products per category page
-DELAY     = 0.4   # seconds between requests
+DELAY     = 0.4   # seconds between requests (per worker, within one category)
+WORKERS   = 4     # parallel category walkers — modest, site rate-limits (429) with backoff
+
+# One requests.Session per worker thread (Session isn't safe to share across threads).
+_thread_local = threading.local()
+
+
+def _worker_session() -> requests.Session:
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = _make_session()
+        _thread_local.session = s
+    return s
 
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -268,77 +282,101 @@ def _standardize(raw: Dict, cat_fallback: str) -> Optional[Dict]:
 # Main scrape
 # ──────────────────────────────────────────────────────────────────────────────
 
-def scrape(db, limit: Optional[int] = None) -> Dict:
+def _scrape_category(cat: Dict) -> List[Dict]:
     """
-    Scrape all leaf categories and save to DB after each one.
-    Flushes per-category offer list from memory after each save.
-    Returns cumulative stats dict.
+    Walk all pages of ONE category (runs in a worker thread).
+    Per-category dedup only; global dedup + DB writes happen single-threaded in scrape().
     """
-    import gc
+    session   = _worker_session()
+    url_path  = cat["url_path"]
+    cat_label = cat["full_path"]
+    page_num  = 1
+    local_seen: set = set()
+    offers: List[Dict] = []
 
+    while True:
+        page = _fetch_category_page(session, url_path, page_num)
+        if not page:
+            break
+        for raw in page:
+            pid = raw.get("product_id", "").strip()
+            if not pid or pid in local_seen:
+                continue
+            local_seen.add(pid)
+            offer = _standardize(raw, cat_label)
+            if offer:
+                offers.append(offer)
+        if len(page) < PAGE_SIZE:
+            break
+        page_num += 1
+        time.sleep(DELAY)
+
+    return offers
+
+
+def scrape(db, limit: Optional[int] = None, workers: int = WORKERS) -> Dict:
+    """
+    Scrape all categories in parallel (each worker walks one category's pages);
+    global dedup + batched crash-safe saves stay on the main thread.
+    """
     session   = _make_session()
     seen_pids: set = set()
     total_saved = total_upserted = total_history = total_skipped = 0
 
     print("Fetching category tree from homepage ...")
     categories = fetch_category_tree(session)
-    print(f"Categories to scrape: {len(categories)}")
+    print(f"Categories to scrape: {len(categories)} with {workers} workers.")
 
-    for cat in categories:
-        url_path  = cat["url_path"]
-        cat_label = cat["full_path"]
-        page_num  = 1
-        cat_offers: List[Dict] = []
+    batch: List[Dict] = []
+    BATCH_SIZE = 500
 
-        while True:
-            page = _fetch_category_page(session, url_path, page_num)
+    def _flush() -> None:
+        nonlocal total_saved, total_upserted, total_history, total_skipped
+        if not batch:
+            return
+        stats = db.save(batch, verbose=False)
+        total_saved    += stats["upserted"]
+        total_upserted += stats["upserted"]
+        total_history  += stats["history_inserted"]
+        total_skipped  += stats["skipped_zero"]
+        print(f"    -> saved {stats['upserted']} | price changes {stats['history_inserted']} | cumul {total_saved}")
+        batch.clear()
 
-            if not page:
-                break
+    done = 0
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futures = {ex.submit(_scrape_category, cat): cat for cat in categories}
+    try:
+        for fut in as_completed(futures):
+            cat = futures[fut]
+            done += 1
+            try:
+                cat_offers = fut.result()
+            except Exception as exc:
+                print(f"  ERROR {cat['full_path'][:50]}: {exc.__class__.__name__}: {exc}")
+                continue
 
-            new_this_page = 0
-            for raw in page:
-                pid = raw.get("product_id", "").strip()
+            new = 0
+            for offer in cat_offers:
+                pid = offer["product_id"]
                 if not pid or pid in seen_pids:
                     continue
                 seen_pids.add(pid)
-                offer = _standardize(raw, cat_label)
-                if offer:
-                    cat_offers.append(offer)
-                    new_this_page += 1
+                batch.append(offer)
+                new += 1
 
-            if new_this_page > 0 or page_num == 1:
-                print(
-                    f"  {cat_label[:50]:<50}  p={page_num:>3}  "
-                    f"got={len(page)}  new={new_this_page}  "
-                    f"saved={total_saved}"
-                )
+            if new or done % 25 == 0:
+                print(f"  [{done:>3}/{len(categories)}] {cat['full_path'][:45]:<45} +{new:<4} unique={len(seen_pids)}")
 
-            if len(page) < PAGE_SIZE:
+            if len(batch) >= BATCH_SIZE:
+                _flush()
+
+            if limit and len(seen_pids) >= limit:
+                print(f"Limit {limit} reached — stopping.")
                 break
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
-            page_num += 1
-            time.sleep(DELAY)
-
-            if limit and total_saved + len(cat_offers) >= limit:
-                break
-
-        # Save this category's batch and free memory
-        if cat_offers:
-            stats = db.save(cat_offers, verbose=False)
-            total_saved    += stats["upserted"]
-            total_upserted += stats["upserted"]
-            total_history  += stats["history_inserted"]
-            total_skipped  += stats["skipped_zero"]
-            print(f"    -> saved {stats['upserted']} | price changes {stats['history_inserted']} | cumul {total_saved}")
-            cat_offers.clear()
-            gc.collect()
-
-        time.sleep(DELAY)
-
-        if limit and total_saved >= limit:
-            print(f"Limit {limit} reached — stopping.")
-            break
+    _flush()
 
     return {"upserted": total_upserted, "history_inserted": total_history,
             "skipped_zero": total_skipped, "total_unique": total_saved}

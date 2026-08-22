@@ -43,7 +43,7 @@ python -m main --log                    # write per-store logs to logs/
 
 # Exports
 python -m db.db_manager export-all-together --dir exports   # combined CSV
-python -m db.db_manager export drogasil                     # one store, full tables
+python -m db.db_manager export redesuperpopular                     # one store, full tables
 
 # Maintenance
 python -m db.db_manager prune all --days 180   # trim old price history

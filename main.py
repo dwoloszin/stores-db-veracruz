@@ -73,6 +73,29 @@ _STORES: Dict[str, List[str]] = {
     "farmsaopaulo":     [sys.executable, "-m", "markets.farmsaopaulo.scraper_farmsaopaulo"],
     "sampharma":        [sys.executable, "-m", "markets.sampharma.scraper_sampharma"],
     "drogal":           [sys.executable, "-m", "markets.drogal.scraper_drogal"],
+    "redesuperpopular": [sys.executable, "-m", "markets.redesuperpopular.scraper_redesuperpopular"],
+    "saojoao":          [sys.executable, "-m", "markets.saojoao.scraper_saojoao"],
+    "venancio":         [sys.executable, "-m", "markets.venancio.scraper_venancio"],
+    "indiana":          [sys.executable, "-m", "markets.indiana.scraper_indiana"],
+    "globo":            [sys.executable, "-m", "markets.globo.scraper_globo"],
+    "permanente":       [sys.executable, "-m", "markets.permanente.scraper_permanente"],
+    "anossadrogaria":   [sys.executable, "-m", "markets.anossadrogaria.scraper_anossadrogaria"],
+    "moderna":          [sys.executable, "-m", "markets.moderna.scraper_moderna"],
+    "santalucia":       [sys.executable, "-m", "markets.santalucia.scraper_santalucia"],
+    "araujo":           [sys.executable, "-m", "markets.araujo.scraper_araujo"],
+    "catarinense":      [sys.executable, "-m", "markets.catarinense.scraper_catarinense"],
+    "callfarma":        [sys.executable, "-m", "markets.callfarma.scraper_callfarma"],
+}
+
+# Stores that share a rate-limited host must NOT run at the same time, or the
+# shared WAF throttles/blocks the IP (it trips on cumulative load — the biggest
+# store then fails mid-run). Stores mapped to the same group run one at a time;
+# different groups and ungrouped stores still run fully in parallel. The three
+# Convertiez pharmacies all sit behind the same Cloudflare/Convertiez WAF.
+_SERIAL_GROUPS: Dict[str, str] = {
+    "campea":       "convertiez",
+    "veracruz":     "convertiez",
+    "farmsaopaulo": "convertiez",
 }
 
 # Stores whose EAN must be enriched from product pages after scraping
@@ -123,46 +146,57 @@ def _run_store(
     starts: Dict[str, float],
     lock: threading.Lock,
     log_enabled: bool = False,
+    group_lock: Optional[threading.Lock] = None,
 ) -> None:
-    t0 = time.time()
-    with lock:
-        starts[store] = t0
-    if log_enabled:
-        _log(store, f"started  (log -> {log_path.name})")
-    else:
-        _log(store, "started")
-
+    # Serial-group gate: if this store shares a WAF group with another running
+    # store, wait until the group frees. Time spent waiting is NOT counted as run
+    # time — t0 is taken only after the lock is held — so durations/ETA stay honest.
+    if group_lock is not None and not group_lock.acquire(blocking=False):
+        _log(store, "queued (serial group busy - starts when the group frees) ...")
+        group_lock.acquire()
     try:
+        t0 = time.time()
+        with lock:
+            starts[store] = t0
         if log_enabled:
-            with log_path.open("w", encoding="utf-8") as lf:
-                proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, text=True)
+            _log(store, f"started  (log -> {log_path.name})")
         else:
-            proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _log(store, "started")
 
-        elapsed = time.time() - t0
-        ok = proc.returncode == 0
-        with lock:
-            results[store] = ok
-            durations[store] = elapsed
-            starts.pop(store, None)
-        status = "done" if ok else f"FAILED (exit {proc.returncode})"
-        _log(store, f"{status}  [{elapsed / 60:.1f} min]")
-
-        if not ok:
+        try:
             if log_enabled:
-                _tail(log_path, lines=30)
+                with log_path.open("w", encoding="utf-8") as lf:
+                    proc = subprocess.run(cmd, stdout=lf, stderr=subprocess.STDOUT, text=True)
             else:
-                _log(store, "  (re-run with --log to see error details)")
+                proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    except Exception as exc:
-        elapsed = time.time() - t0
-        with lock:
-            results[store] = False
-            durations[store] = elapsed
-            starts.pop(store, None)
-        _log(store, f"ERROR: {exc}")
-        import traceback
-        traceback.print_exc()
+            elapsed = time.time() - t0
+            ok = proc.returncode == 0
+            with lock:
+                results[store] = ok
+                durations[store] = elapsed
+                starts.pop(store, None)
+            status = "done" if ok else f"FAILED (exit {proc.returncode})"
+            _log(store, f"{status}  [{elapsed / 60:.1f} min]")
+
+            if not ok:
+                if log_enabled:
+                    _tail(log_path, lines=30)
+                else:
+                    _log(store, "  (re-run with --log to see error details)")
+
+        except Exception as exc:
+            elapsed = time.time() - t0
+            with lock:
+                results[store] = False
+                durations[store] = elapsed
+                starts.pop(store, None)
+            _log(store, f"ERROR: {exc}")
+            import traceback
+            traceback.print_exc()
+    finally:
+        if group_lock is not None:
+            group_lock.release()
 
 
 def _log(store: str, msg: str) -> None:
@@ -279,15 +313,27 @@ def _run_phase(
     lock = threading.Lock()
     threads: List[threading.Thread] = []
 
+    # One lock per serial group present in this run; stores sharing a group run
+    # one at a time (see _SERIAL_GROUPS), everything else stays parallel.
+    group_locks: Dict[str, threading.Lock] = {}
+    serialized = {s: _SERIAL_GROUPS[s] for s in stores if s in _SERIAL_GROUPS}
+    if serialized:
+        for grp in sorted(set(serialized.values())):
+            members = [s for s in stores if serialized.get(s) == grp]
+            if len(members) > 1:
+                print(f"  serial group '{grp}': {', '.join(members)} will run one at a time")
+
     for store in stores:
         cmd = build_cmd(store, args)
         log_name = f"{store}{suffix}_{ts}.log"
         log_path = log_dir / log_name
         log_paths[store] = log_path
+        grp = _SERIAL_GROUPS.get(store)
+        glock = group_locks.setdefault(grp, threading.Lock()) if grp else None
         t = threading.Thread(
             target=_run_store,
             args=(store, cmd, log_path, results, durations, starts, lock),
-            kwargs={"log_enabled": log_enabled},
+            kwargs={"log_enabled": log_enabled, "group_lock": glock},
             name=f"{phase_name}:{store}",
             daemon=False,
         )

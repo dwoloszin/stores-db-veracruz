@@ -20,8 +20,10 @@ import csv
 import json
 import re
 import sys
+import threading
 import time
-from datetime import datetime   
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,8 +35,20 @@ BASE_URL   = "https://www.drogaraia.com.br"
 STORE_ID   = "drogaraia"
 PAGE_SIZE  = 48    # products per SSR page (Algolia default for Raia/Drogasil)
 MAX_PAGES  = 50    # safety ceiling: 50 x 48 = 2400 (Algolia caps at ~2000 per query)
-DELAY      = 0.35  # seconds between page requests (HTML is heavier than JSON)
+DELAY      = 0.35  # seconds between page requests (per worker, within one category)
+WORKERS    = 4     # parallel leaf walkers — modest, WAF (Googlebot-UA) is block-sensitive
 RETRY_MAX  = 5
+
+# One requests.Session per worker thread (Session isn't safe to share across threads).
+_thread_local = threading.local()
+
+
+def _worker_session() -> requests.Session:
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = _make_session()
+        _thread_local.session = s
+    return s
 CATEGORY_CACHE_FILE = Path(__file__).with_name("drogaraia_category_tree_cache.json")
 
 # Googlebot UA is allowed through the Cloudflare WAF on page routes
@@ -318,14 +332,47 @@ def _standardize(raw: Dict) -> Optional[Dict]:
 # Main scrape
 # ──────────────────────────────────────────────────────────────────────────────
 
-def scrape(db, limit: Optional[int] = None) -> Dict:
+def _scrape_category(cat: Dict) -> List[Dict]:
     """
-    Scrape all leaf categories and save to DB after each one.
-    Flushes per-category offer list from memory after each save.
-    Returns cumulative stats dict.
+    Walk all pages of ONE leaf category (runs in a worker thread).
+    Per-category dedup only; global dedup + DB writes happen single-threaded in scrape().
     """
-    import gc
+    session   = _worker_session()
+    cat_id    = cat["id"]
+    page_num  = 1
+    cat_total = None
+    local_seen: set = set()
+    offers: List[Dict] = []
 
+    while True:
+        if page_num > MAX_PAGES:
+            break
+        page, total = _fetch_category_page(session, cat_id, page_num)
+        if cat_total is None and total:
+            cat_total = total
+        if not page:
+            break
+        for raw in page:
+            sku = str(raw.get("sku") or raw.get("objectID") or "").strip()
+            if not sku or sku in local_seen:
+                continue
+            local_seen.add(sku)
+            offer = _standardize(raw)
+            if offer:
+                offers.append(offer)
+        if len(page) < PAGE_SIZE:
+            break
+        page_num += 1
+        time.sleep(DELAY)
+
+    return offers
+
+
+def scrape(db, limit: Optional[int] = None, workers: int = WORKERS) -> Dict:
+    """
+    Scrape all leaf categories in parallel (each worker walks one category's pages);
+    global dedup + batched crash-safe saves (upsert, preserve_promo) stay on the main thread.
+    """
     session   = _make_session()
     seen_skus: set = set()
     total_saved = total_upserted = total_history = total_skipped = 0
@@ -346,76 +393,60 @@ def scrape(db, limit: Optional[int] = None) -> Dict:
         else:
             raise
 
-    leaves    = [n for n in all_nodes if n["is_leaf"]]
-    print(f"Found {len(all_nodes)} total categories, {len(leaves)} leaves to scrape.")
+    leaves    = [n for n in all_nodes if n["is_leaf"] and n["id"]]
+    print(f"Found {len(all_nodes)} total categories, {len(leaves)} leaves to scrape "
+          f"with {workers} workers.")
 
-    for cat in leaves:
-        cat_id    = cat["id"]
-        cat_label = cat["full_path"]
-        if not cat_id:
-            continue
+    batch: List[Dict] = []
+    BATCH_SIZE = 500
 
-        page_num   = 1
-        cat_total  = None
-        cat_offers: List[Dict] = []
+    def _flush() -> None:
+        nonlocal total_saved, total_upserted, total_history, total_skipped
+        if not batch:
+            return
+        stats = db.save(batch, verbose=False, preserve_promo=True)
+        total_saved    += stats["upserted"]
+        total_upserted += stats["upserted"]
+        total_history  += stats["history_inserted"]
+        total_skipped  += stats["skipped_zero"]
+        print(f"    -> saved {stats['upserted']} | price changes {stats['history_inserted']} | cumul {total_saved}")
+        batch.clear()
 
-        while True:
-            if page_num > MAX_PAGES:
-                if cat_total and cat_total > PAGE_SIZE * MAX_PAGES:
-                    print(f"  WARNING: {cat_label[:50]} has {cat_total} products, "
-                          f"capped at {PAGE_SIZE * MAX_PAGES} (Algolia limit)")
-                break
+    done = 0
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futures = {ex.submit(_scrape_category, cat): cat for cat in leaves}
+    try:
+        for fut in as_completed(futures):
+            cat = futures[fut]
+            done += 1
+            try:
+                cat_offers = fut.result()
+            except Exception as exc:
+                print(f"  ERROR {cat['full_path'][:50]}: {exc.__class__.__name__}: {exc}")
+                continue
 
-            page, total = _fetch_category_page(session, cat_id, page_num)
-            if cat_total is None and total:
-                cat_total = total
-            if not page:
-                break
-
-            new_this_page = 0
-            for raw in page:
-                sku = str(raw.get("sku") or raw.get("objectID") or "").strip()
-                if not sku or sku in seen_skus:
+            new = 0
+            for offer in cat_offers:
+                pid = offer["product_id"]
+                if not pid or pid in seen_skus:
                     continue
-                seen_skus.add(sku)
-                offer = _standardize(raw)
-                if offer:
-                    cat_offers.append(offer)
-                    new_this_page += 1
+                seen_skus.add(pid)
+                batch.append(offer)
+                new += 1
 
-            if new_this_page > 0 or page_num == 1:
-                print(
-                    f"  {cat_label[:50]:<50}  p={page_num:>3}  "
-                    f"got={len(page)}  new={new_this_page}  "
-                    f"cat_total={cat_total or '?':>6}  "
-                    f"saved={total_saved}"
-                )
+            if new or done % 25 == 0:
+                print(f"  [{done:>3}/{len(leaves)}] {cat['full_path'][:45]:<45} +{new:<4} unique={len(seen_skus)}")
 
-            if len(page) < PAGE_SIZE:
+            if len(batch) >= BATCH_SIZE:
+                _flush()
+
+            if limit and len(seen_skus) >= limit:
+                print(f"Limit {limit} reached — stopping.")
                 break
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
-            page_num += 1
-            time.sleep(DELAY)
-
-            if limit and total_saved + len(cat_offers) >= limit:
-                break
-
-        # Save this category's batch and free memory
-        if cat_offers:
-            stats = db.save(cat_offers, verbose=False, preserve_promo=True)
-            total_saved    += stats["upserted"]
-            total_upserted += stats["upserted"]
-            total_history  += stats["history_inserted"]
-            total_skipped  += stats["skipped_zero"]
-            print(f"    -> saved {stats['upserted']} | price changes {stats['history_inserted']} | cumul {total_saved}")
-            cat_offers.clear()
-            gc.collect()
-
-        time.sleep(DELAY)
-
-        if limit and total_saved >= limit:
-            print(f"Limit {limit} reached — stopping.")
-            break
+    _flush()
 
     return {"upserted": total_upserted, "history_inserted": total_history,
             "skipped_zero": total_skipped, "total_unique": total_saved}
