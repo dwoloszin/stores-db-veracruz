@@ -1,7 +1,7 @@
 # .github/workflows/scrape.yml
 #
 # Per-store scraper workflow — injected into each store repo by deploy/deploy.py.
-# The cron schedule is replaced by deploy.py (21 4,16 * * * -> actual value).
+# The cron schedule is replaced by deploy.py (25 5,17 * * * -> actual value).
 #
 # Secrets required in each store repo (set automatically by deploy.py):
 #   STORE_KEY               — store key, e.g. "drogaleste"
@@ -18,7 +18,7 @@ concurrency:
 
 on:
   schedule:
-    - cron: '21 4,16 * * *'   # per-store frequency tier — set by deploy.py (see STORE_SCHEDULE)
+    - cron: '25 5,17 * * *'   # per-store frequency tier — set by deploy.py (see STORE_SCHEDULE)
   workflow_dispatch:
     inputs:
       limit:
