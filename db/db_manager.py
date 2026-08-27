@@ -988,6 +988,16 @@ class RosarioDB(StoreDB):
     DB_ENV_KEY = "DATABASE_URL_ROSARIO"
 
 
+class SantoRemedioDB(StoreDB):
+    STORE_ID   = "santoremedio"
+    DB_ENV_KEY = "DATABASE_URL_SANTOREMEDIO"
+
+
+class PrecoPopularDB(StoreDB):
+    STORE_ID   = "precopopular"
+    DB_ENV_KEY = "DATABASE_URL_PRECOPOPULAR"
+
+
 # Registry used by the CLI
 STORE_REGISTRY: Dict[str, type] = {
     "drogaleste":       DrogalesteDB,
@@ -1045,6 +1055,8 @@ STORE_REGISTRY: Dict[str, type] = {
     "callfarma":        CallfarmaDB,
     "drogasmil":        DrogasmilDB,
     "rosario":          RosarioDB,
+    "santoremedio":     SantoRemedioDB,
+    "precopopular":     PrecoPopularDB,
 }
 
 
