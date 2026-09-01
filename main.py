@@ -89,6 +89,7 @@ _STORES: Dict[str, List[str]] = {
     "rosario":          [sys.executable, "-m", "markets.rosario.scraper_rosario"],
     "santoremedio":     [sys.executable, "-m", "markets.santoremedio.scraper_santoremedio"],
     "precopopular":     [sys.executable, "-m", "markets.precopopular.scraper_precopopular"],
+    "drogarialecer":    [sys.executable, "-m", "markets.drogarialecer.scraper_drogarialecer"],
 }
 
 # Stores that share a rate-limited host must NOT run at the same time, or the
