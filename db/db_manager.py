@@ -1013,6 +1013,11 @@ class DiabetesCenterDB(StoreDB):
     DB_ENV_KEY = "DATABASE_URL_DIABETESCENTER"
 
 
+class PenseFarmaDB(StoreDB):
+    STORE_ID   = "pensefarma"
+    DB_ENV_KEY = "DATABASE_URL_PENSEFARMA"
+
+
 # Registry used by the CLI
 STORE_REGISTRY: Dict[str, type] = {
     "drogaleste":       DrogalesteDB,
@@ -1074,6 +1079,7 @@ STORE_REGISTRY: Dict[str, type] = {
     "precopopular":     PrecoPopularDB,
     "drogarialecer":    DrogariaLecerDB,
     "diabetescenter":   DiabetesCenterDB,
+    "pensefarma":       PenseFarmaDB,
     # maxxieconomica DROPPED 2026-08-27 (marginal: ~5.7k useful of 18.8k URLs, custom
     # HTML, server throughput-bound ~35min; no bulk endpoint) — class kept dormant above
 }
