@@ -107,13 +107,22 @@ def fetch_category_nodes(
     Returns a flat list of 2nd-level subcategories, each with:
       cat_id, dept_slug, sub_slug, full_path
     """
-    r = session.get(
-        f"{BASE_URL}/api/v1/category/menu",
-        headers=_api_headers(session_id),
-        timeout=20,
-    )
-    r.raise_for_status()
-    menu = r.json()
+    # Retry the category-menu fetch: the API rate-limits it (429) and can return a
+    # non-JSON interstitial (200 + HTML) to datacenter IPs.
+    menu = None
+    for _attempt in range(6):
+        r = session.get(f"{BASE_URL}/api/v1/category/menu",
+                        headers=_api_headers(session_id), timeout=20)
+        if r.status_code in (429, 500, 502, 503, 504):
+            time.sleep(min(5 * (_attempt + 1), 30))
+            continue
+        try:
+            menu = r.json()
+            break
+        except ValueError:
+            time.sleep(min(5 * (_attempt + 1), 30))
+    if menu is None:
+        raise RuntimeError("category menu fetch failed after retries (rate-limited/non-JSON)")
 
     nodes: List[Dict] = []
     for dept in menu.get("categories") or []:

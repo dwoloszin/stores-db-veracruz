@@ -79,9 +79,11 @@ def fetch_category_nodes(session: requests.Session) -> List[Dict]:
         if r.status_code in (429, 500, 502, 503, 504):
             time.sleep(min(5 * (attempt + 1), 30))
             continue
-        r.raise_for_status()
-        tree = r.json()
-        break
+        try:                       # a WAF interstitial can return 200 + non-JSON HTML
+            tree = r.json()
+            break
+        except ValueError:
+            time.sleep(min(5 * (attempt + 1), 30))
     if tree is None:
         raise RuntimeError("category tree fetch failed after retries (rate-limited)")
 
