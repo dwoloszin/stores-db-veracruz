@@ -1028,6 +1028,11 @@ class RedeFarmaPrimeDB(StoreDB):
     DB_ENV_KEY = "DATABASE_URL_REDEFARMAPRIME"
 
 
+class FarmamedDB(StoreDB):
+    STORE_ID   = "farmamed"
+    DB_ENV_KEY = "DATABASE_URL_FARMAMED"
+
+
 # Registry used by the CLI
 STORE_REGISTRY: Dict[str, type] = {
     "drogaleste":       DrogalesteDB,
@@ -1092,6 +1097,7 @@ STORE_REGISTRY: Dict[str, type] = {
     "pensefarma":       PenseFarmaDB,
     "promofarma":       PromoFarmaDB,
     "redefarmaprime":   RedeFarmaPrimeDB,
+    "farmamed":         FarmamedDB,
     # maxxieconomica DROPPED 2026-08-27 (marginal: ~5.7k useful of 18.8k URLs, custom
     # HTML, server throughput-bound ~35min; no bulk endpoint) — class kept dormant above
 }
