@@ -33,7 +33,8 @@ import requests
 
 sys.stdout.reconfigure(line_buffering=True)
 
-BASE_URL  = "https://www.drogarialecer.com.br"
+BASE_URL  = "https://www.drogarialecer.com.br"                 # storefront (product_url); Cloudflare-WAF blocks datacenter IPs
+API_HOST  = "https://drogarialecer.vtexcommercestable.com.br"  # VTEX backend host — bypasses the storefront WAF (used for all catalog API calls)
 STORE_ID  = "drogarialecer"
 PAGE_SIZE = 50    # VTEX max per request
 VTEX_CAP  = 2549  # VTEX hard ceiling: _to cannot exceed this
@@ -76,7 +77,7 @@ def fetch_category_nodes(session: requests.Session) -> List[Dict]:
     # return a non-JSON WAF interstitial (200 + HTML) to datacenter IPs.
     tree = None
     for _attempt in range(6):
-        r = session.get(f"{BASE_URL}/api/catalog_system/pub/category/tree/5", timeout=25)
+        r = session.get(f"{API_HOST}/api/catalog_system/pub/category/tree/5", timeout=25)
         if r.status_code in (429, 500, 502, 503, 504):
             time.sleep(min(5 * (_attempt + 1), 30))
             continue
@@ -137,7 +138,7 @@ def _fetch_page(
     """Returns (items, total_in_category). Handles rate-limit retry."""
     to_ = min(from_ + PAGE_SIZE - 1, VTEX_CAP)
     r = session.get(
-        f"{BASE_URL}/api/catalog_system/pub/products/search/",
+        f"{API_HOST}/api/catalog_system/pub/products/search/",
         params={"fq": fq, "_from": from_, "_to": to_},
         timeout=30,
     )

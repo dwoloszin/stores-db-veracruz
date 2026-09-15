@@ -106,12 +106,16 @@ _SERIAL_GROUPS: Dict[str, str] = {
     "campea":       "convertiez",
     "veracruz":     "convertiez",
     "farmsaopaulo": "convertiez",
+    # RD chains (Raia/Drogasil) now scrape via the SAME shared Algolia app
+    # (A7RGTHYMDQ); run one at a time to stay gentle on that shared app's QPS.
+    "drogasil":     "rd_algolia",
+    "drogaraia":    "rd_algolia",
 }
 
 # Stores whose EAN must be enriched from product pages after scraping
 _EAN_ENRICHERS: Dict[str, List[str]] = {
-    "drogasil":  [sys.executable, "-m", "markets.drogasil.enrich_ean_drogasil"],
-    "drogaraia": [sys.executable, "-m", "markets.drogaraia.enrich_ean_drogaraia"],
+    # drogasil/drogaraia now scrape via Algolia which returns eanCode inline -> no
+    # enrichment needed (and the old page-based enricher would hit the Akamai block).
     "farmaconde": [sys.executable, "-m", "markets.farmaconde.enrich_ean_farmaconde"],
     "ultrafarma":[sys.executable, "-m", "markets.ultrafarma.enrich_ean_ultrafarma"],
     "panvel":    [sys.executable, "-m", "markets.panvel.enrich_ean_panvel"],

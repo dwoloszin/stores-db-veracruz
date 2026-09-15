@@ -40,7 +40,9 @@ sys.stdout.reconfigure(line_buffering=True)
 
 BASE_URL   = "https://www.drogariaveracruz.com.br"
 STORE_ID   = "veracruz"
-SITEMAP    = f"{BASE_URL}/s/drogariaveracruz/sitemap.xml"
+IO_HOST    = "https://io.convertiez.com.br"   # product sitemaps live here now (storefront path 404s)
+CV_SLUG    = "drogariaveracruz"
+SITEMAP    = f"{IO_HOST}/s/{CV_SLUG}/sitemap.xml"
 WORKERS    = 16
 DELAY      = 0.0
 MAX_TRIES  = 4
@@ -108,7 +110,7 @@ def _get(session: requests.Session, url: str, diag: bool = False) -> Optional[re
 # Known product sub-sitemaps — used as a fallback when the index can't be
 # fetched/parsed (e.g. a datacenter-IP bot challenge that returns HTML, not XML).
 SUBMAP_FALLBACK = [
-    f"{BASE_URL}/s/drogariaveracruz/sitemap-products-{i}.xml" for i in range(1, 6)
+    f"{IO_HOST}/s/{CV_SLUG}/sitemap-products-{i}.xml" for i in range(1, 6)
 ]
 
 
@@ -131,6 +133,9 @@ def fetch_product_urls(session: requests.Session) -> List[str]:
                 for loc in idx.findall(".//sm:loc", _XML_NS)
                 if loc.text and "product" in loc.text.lower()
             ]
+            # the index lists sub-maps on the storefront host, which now 404s;
+            # the real product sub-maps live on io.convertiez -> force that host.
+            sub_maps = [re.sub(r"^https?://[^/]+", IO_HOST, u) for u in sub_maps]
         except ET.ParseError:
             # Not XML — almost always a bot-challenge/HTML page from datacenter IPs.
             print(f"  sitemap index is not XML ({_snippet(root)}) — using fallback URLs")
