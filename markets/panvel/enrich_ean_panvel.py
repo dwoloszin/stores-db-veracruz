@@ -19,7 +19,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Optional
 
-import requests
+# panvel is behind Akamai Bot Manager — plain requests gets 403. curl_cffi
+# impersonates Chrome's TLS fingerprint and passes (see scraper_panvel.py).
+from curl_cffi import requests
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -38,11 +40,9 @@ _local = threading.local()
 def _get_session() -> tuple:
     """Thread-local requests session + sessionId."""
     if not hasattr(_local, "session"):
-        s = requests.Session()
+        s = requests.Session(impersonate="chrome")
         s.headers.update({
-            "User-Agent":      BROWSER_UA,
             "Accept-Language": "pt-BR,pt;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
         })
         # Warm up cookies
         s.get(BASE_URL, timeout=15)

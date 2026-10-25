@@ -11,6 +11,16 @@
 
 name: Scrape
 
+# GitHub auto-disables a SCHEDULED workflow after 60 days with no repository
+# activity -- and a schedule trigger firing does NOT itself count as activity,
+# only a git push/commit does. Since this repo only writes to Neon (never to
+# its own git history), every store would silently go dark ~60 days after its
+# last deploy. The "Keep-alive commit" step below pushes a tiny marker file on
+# every run, which IS activity -- this permanently resets the clock, forever,
+# with no manual intervention. See reference_github_actions_ops memory.
+permissions:
+  contents: write
+
 # Never run two scrapes at once (scheduled + manual, or a run that overruns)
 concurrency:
   group: scrape
@@ -108,3 +118,17 @@ jobs:
       - name: Prune old price history
         if: success()
         run: python -m db.db_manager prune "${{ secrets.STORE_KEY }}" --days 180
+
+      - name: Keep-alive commit
+        # Runs regardless of scrape outcome -- the point is purely to generate
+        # git activity so GitHub never auto-disables the schedule trigger.
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .last_run
+          git add .last_run
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: keep-alive (prevents GitHub's 60-day inactivity auto-disable)"
+            git push
+          fi
